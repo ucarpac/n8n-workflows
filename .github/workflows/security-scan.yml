@@ -76,10 +76,11 @@ jobs:
         echo "=== Secrets Manager Check ==="
         
         # シークレットの一覧（値は表示しない）
+        echo "Checking secrets configuration..."
         gcloud secrets list \
           --project=${{ secrets.GCP_PROJECT_ID }} \
           --filter="name:n8n-*" \
-          --format="table(name,createTime)"
+          --format="table(name,createTime)" 2>/dev/null || echo "Secrets not accessible (permission required: secretmanager.secrets.list)"
     
     - name: Summary
       if: always()
