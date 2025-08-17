@@ -7,9 +7,9 @@ on:
 
 env:
   GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  VM_NAME: n8n-vm
-  VM_ZONE: asia-northeast1-a
-  SQL_INSTANCE: n8n-db
+  VM_NAME: n8n-test-vm
+  VM_ZONE: asia-northeast1-b
+  SQL_INSTANCE: n8n-postgres
   SQL_REGION: asia-northeast1
 
 jobs:
