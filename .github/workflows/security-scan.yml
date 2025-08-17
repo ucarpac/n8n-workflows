@@ -1,0 +1,94 @@
+name: Security Scan
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'  # 毎週月曜日の午前3時（UTC）
+  workflow_dispatch:  # 手動実行も可能
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  VM_NAME: n8n-vm
+  VM_ZONE: asia-northeast1-a
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+    
+    - name: Setup Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Set GCP Project
+      run: |
+        gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Check VM Security Settings
+      run: |
+        echo "=== VM Security Configuration Check ==="
+        
+        # ファイアウォールルールの確認
+        echo "Checking firewall rules..."
+        gcloud compute firewall-rules list \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --filter="targetTags.list():n8n-vm" \
+          --format="table(name,direction,priority,sourceRanges.list():label=SRC_RANGES,allowed[].map().firewall_rule().list():label=ALLOW)"
+        
+        # VMのメタデータ確認
+        echo "Checking VM metadata..."
+        gcloud compute instances describe ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="value(metadata.items[].key)"
+    
+    - name: Check IAM Permissions
+      run: |
+        echo "=== IAM Security Check ==="
+        
+        # サービスアカウントの権限確認
+        SERVICE_ACCOUNT="n8n-deployment-service@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com"
+        
+        echo "Checking service account roles..."
+        gcloud projects get-iam-policy ${{ secrets.GCP_PROJECT_ID }} \
+          --flatten="bindings[].members" \
+          --filter="bindings.members:$SERVICE_ACCOUNT" \
+          --format="table(bindings.role)"
+    
+    - name: Check SSL Certificates
+      run: |
+        echo "=== SSL Certificate Check ==="
+        
+        # SSL証明書の確認
+        gcloud compute ssl-certificates list \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="table(name,creationTimestamp,expireTime)"
+    
+    - name: Check Secrets Manager
+      run: |
+        echo "=== Secrets Manager Check ==="
+        
+        # シークレットの一覧（値は表示しない）
+        gcloud secrets list \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --filter="name:n8n-*" \
+          --format="table(name,createTime)"
+    
+    - name: Summary
+      if: always()
+      run: |
+        echo "==================================="
+        echo "Security Scan Summary"
+        echo "==================================="
+        echo "Timestamp: $(date)"
+        echo "Project: ${{ secrets.GCP_PROJECT_ID }}"
+        echo "VM: ${{ env.VM_NAME }}"
+        echo "==================================="

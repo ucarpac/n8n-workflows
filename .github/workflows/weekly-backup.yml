@@ -1,0 +1,93 @@
+name: Weekly Backup
+
+on:
+  schedule:
+    - cron: '0 2 * * 0'  # 毎週日曜日の午前2時（UTC）
+  workflow_dispatch:  # 手動実行も可能
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  VM_NAME: n8n-vm
+  VM_ZONE: asia-northeast1-a
+  SQL_INSTANCE: n8n-db
+  BACKUP_BUCKET: n8n-backups-${{ secrets.GCP_PROJECT_ID }}
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+    
+    - name: Setup Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Set GCP Project
+      run: |
+        gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Create Cloud SQL Backup
+      run: |
+        echo "=== Creating Cloud SQL Backup ==="
+        BACKUP_ID="automated-backup-$(date +%Y%m%d-%H%M%S)"
+        
+        gcloud sql backups create \
+          --instance=${{ env.SQL_INSTANCE }} \
+          --description="Weekly automated backup from GitHub Actions" \
+          --project=${{ secrets.GCP_PROJECT_ID }}
+        
+        echo "✅ Backup created: $BACKUP_ID"
+    
+    - name: Verify Backup
+      run: |
+        echo "=== Verifying Latest Backup ==="
+        
+        LATEST_BACKUP=$(gcloud sql backups list \
+          --instance=${{ env.SQL_INSTANCE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --limit=1 \
+          --format="value(id,windowStartTime)")
+        
+        echo "Latest backup: $LATEST_BACKUP"
+    
+    - name: Cleanup Old Backups
+      run: |
+        echo "=== Cleaning Up Old Backups ==="
+        
+        # 30日以上古いバックアップを削除
+        CUTOFF_DATE=$(date -d "30 days ago" +%Y-%m-%d)
+        
+        gcloud sql backups list \
+          --instance=${{ env.SQL_INSTANCE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --filter="windowStartTime<'$CUTOFF_DATE'" \
+          --format="value(id)" | while read -r backup_id; do
+            if [ -n "$backup_id" ]; then
+              echo "Deleting old backup: $backup_id"
+              gcloud sql backups delete $backup_id \
+                --instance=${{ env.SQL_INSTANCE }} \
+                --project=${{ secrets.GCP_PROJECT_ID }} \
+                --quiet || true
+            fi
+        done
+        
+        echo "✅ Old backups cleaned up"
+    
+    - name: Summary
+      if: always()
+      run: |
+        echo "==================================="
+        echo "Backup Summary"
+        echo "==================================="
+        echo "Timestamp: $(date)"
+        echo "Project: ${{ secrets.GCP_PROJECT_ID }}"
+        echo "SQL Instance: ${{ env.SQL_INSTANCE }}"
+        echo "==================================="

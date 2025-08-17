@@ -1,0 +1,142 @@
+name: Daily Health Check
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 毎日深夜0時（UTC）
+  workflow_dispatch:  # 手動実行も可能
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  VM_NAME: n8n-vm
+  VM_ZONE: asia-northeast1-a
+  SQL_INSTANCE: n8n-db
+  SQL_REGION: asia-northeast1
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+    
+    - name: Setup Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Set GCP Project
+      run: |
+        gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+        echo "Current project: $(gcloud config get-value project)"
+    
+    - name: Database Health Check
+      run: |
+        echo "=== Database Health Check ==="
+        echo "Checking Cloud SQL instance status..."
+        
+        # Cloud SQL インスタンスの状態確認
+        DB_STATE=$(gcloud sql instances describe ${{ env.SQL_INSTANCE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="value(state)")
+        
+        echo "Database State: $DB_STATE"
+        
+        if [ "$DB_STATE" != "RUNNABLE" ]; then
+          echo "⚠️ WARNING: Database is not in RUNNABLE state!"
+          exit 1
+        fi
+        
+        echo "✅ Database is healthy"
+    
+    - name: VM Instance Check
+      run: |
+        echo "=== VM Instance Health Check ==="
+        echo "Checking VM instance status..."
+        
+        # VMインスタンスの状態確認
+        VM_STATUS=$(gcloud compute instances describe ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="value(status)")
+        
+        echo "VM Status: $VM_STATUS"
+        
+        if [ "$VM_STATUS" != "RUNNING" ]; then
+          echo "⚠️ WARNING: VM is not RUNNING!"
+          exit 1
+        fi
+        
+        echo "✅ VM is running"
+        
+        # VMの外部IPアドレス取得
+        VM_IP=$(gcloud compute instances describe ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="value(networkInterfaces[0].accessConfigs[0].natIP)")
+        
+        echo "VM External IP: $VM_IP"
+    
+    - name: Check VM Disk Usage
+      run: |
+        echo "=== VM Disk Usage Check ==="
+        
+        # ディスク情報の取得
+        DISK_INFO=$(gcloud compute disks describe ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="json")
+        
+        DISK_SIZE=$(echo "$DISK_INFO" | jq -r '.sizeGb')
+        echo "Disk Size: ${DISK_SIZE}GB"
+    
+    - name: Check Backup Status
+      run: |
+        echo "=== Backup Status Check ==="
+        
+        # Cloud SQLの最新バックアップ確認
+        LATEST_BACKUP=$(gcloud sql backups list \
+          --instance=${{ env.SQL_INSTANCE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --limit=1 \
+          --format="value(windowStartTime)")
+        
+        if [ -n "$LATEST_BACKUP" ]; then
+          echo "Latest backup: $LATEST_BACKUP"
+          echo "✅ Backup exists"
+        else
+          echo "⚠️ WARNING: No backups found!"
+        fi
+    
+    - name: Check Load Balancer Health
+      run: |
+        echo "=== Load Balancer Health Check ==="
+        
+        # バックエンドサービスの健全性確認
+        BACKEND_HEALTH=$(gcloud compute backend-services get-health n8n-backend-service \
+          --global \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="json" 2>/dev/null || echo "{}")
+        
+        if [ "$BACKEND_HEALTH" != "{}" ]; then
+          echo "✅ Load Balancer backend is configured"
+        else
+          echo "ℹ️ Load Balancer backend not found or not accessible"
+        fi
+    
+    - name: Summary
+      if: always()
+      run: |
+        echo "==================================="
+        echo "Health Check Summary"
+        echo "==================================="
+        echo "Timestamp: $(date)"
+        echo "Project: ${{ secrets.GCP_PROJECT_ID }}"
+        echo "VM: ${{ env.VM_NAME }} in ${{ env.VM_ZONE }}"
+        echo "Database: ${{ env.SQL_INSTANCE }}"
+        echo "==================================="
