@@ -120,7 +120,7 @@ jobs:
               -e DB_TYPE=postgresdb \\
               -e DB_POSTGRESDB_HOST=172.17.0.1 \\
               -e DB_POSTGRESDB_PORT=5432 \\
-              -e DB_POSTGRESDB_DATABASE=n8n \\
+              -e DB_POSTGRESDB_DATABASE=n8n_fresh \\
               -e DB_POSTGRESDB_USER=n8n_user \\
               -e DB_POSTGRESDB_PASSWORD=n8n_password \\
               -e DB_POSTGRESDB_SCHEMA=public \\
