@@ -1,0 +1,199 @@
+name: n8n Auto Update
+
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # 毎週月曜日の午前4時（UTC）
+  workflow_dispatch:  # 手動実行も可能
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  VM_NAME: n8n-test-vm
+  VM_ZONE: asia-northeast1-b
+
+jobs:
+  update-n8n:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        credentials_json: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
+    
+    - name: Setup Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Set GCP Project
+      run: |
+        gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+    
+    - name: Check Current n8n Version
+      id: current_version
+      run: |
+        echo "=== Current n8n Version Check ==="
+        
+        CURRENT_VERSION=$(gcloud compute ssh ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --command="docker exec n8n-app n8n --version" 2>/dev/null || echo "unknown")
+        
+        echo "Current version: $CURRENT_VERSION"
+        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+    
+    - name: Check Latest n8n Version
+      id: latest_version
+      run: |
+        echo "=== Latest n8n Version Check ==="
+        
+        LATEST_VERSION=$(curl -s https://api.github.com/repos/n8n-io/n8n/releases/latest | \
+          grep '"tag_name"' | cut -d '"' -f 4 | sed 's/n8n@//')
+        
+        echo "Latest version: $LATEST_VERSION"
+        echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+    
+    - name: Compare Versions
+      id: version_check
+      run: |
+        CURRENT="${{ steps.current_version.outputs.current_version }}"
+        LATEST="${{ steps.latest_version.outputs.latest_version }}"
+        
+        echo "Current: $CURRENT"
+        echo "Latest: $LATEST"
+        
+        if [ "$CURRENT" != "$LATEST" ] && [ "$CURRENT" != "unknown" ]; then
+          echo "needs_update=true" >> $GITHUB_OUTPUT
+          echo "🆙 Update needed: $CURRENT → $LATEST"
+        else
+          echo "needs_update=false" >> $GITHUB_OUTPUT
+          echo "✅ n8n is up to date"
+        fi
+    
+    - name: Create Pre-Update Backup
+      if: steps.version_check.outputs.needs_update == 'true'
+      run: |
+        echo "=== Creating Pre-Update Backup ==="
+        
+        BACKUP_ID="pre-update-backup-$(date +%Y%m%d-%H%M%S)"
+        
+        gcloud sql backups create \
+          --instance=n8n-postgres \
+          --description="Pre-update backup before n8n upgrade to ${{ steps.latest_version.outputs.latest_version }}" \
+          --project=${{ secrets.GCP_PROJECT_ID }}
+        
+        echo "✅ Pre-update backup created: $BACKUP_ID"
+    
+    - name: Update n8n Docker Container
+      if: steps.version_check.outputs.needs_update == 'true'
+      run: |
+        echo "=== Updating n8n to version ${{ steps.latest_version.outputs.latest_version }} ==="
+        
+        # VM上でアップデート実行
+        gcloud compute ssh ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --command="
+            echo 'Pulling latest n8n image...'
+            sudo docker pull n8nio/n8n:latest
+            
+            echo 'Stopping current n8n container...'
+            sudo docker stop n8n-app || true
+            
+            echo 'Removing old container...'
+            sudo docker rm n8n-app || true
+            
+            echo 'Starting new n8n container...'
+            sudo docker run -d \\
+              --name n8n-app \\
+              --restart unless-stopped \\
+              -p 8080:5678 \\
+              -e N8N_HOST=0.0.0.0 \\
+              -e N8N_PORT=5678 \\
+              -e N8N_PROTOCOL=https \\
+              -e WEBHOOK_URL=https://n8n.ucarpac.co.jp/ \\
+              -e GENERIC_TIMEZONE=Asia/Tokyo \\
+              -e N8N_DEFAULT_LOCALE=ja \\
+              -e N8N_LOG_LEVEL=info \\
+              -e DB_TYPE=postgresdb \\
+              -e DB_POSTGRESDB_HOST=172.17.0.1 \\
+              -e DB_POSTGRESDB_PORT=5432 \\
+              -e DB_POSTGRESDB_DATABASE=n8n \\
+              -e DB_POSTGRESDB_USER=n8n_user \\
+              -e DB_POSTGRESDB_PASSWORD=n8n_password \\
+              -e DB_POSTGRESDB_SCHEMA=public \\
+              -v n8n_data:/home/node/.n8n \\
+              n8nio/n8n:latest
+            
+            echo 'Waiting for n8n to start...'
+            sleep 30
+            
+            echo 'Checking n8n status...'
+            docker ps | grep n8n-app
+            "
+    
+    - name: Verify Update
+      if: steps.version_check.outputs.needs_update == 'true'
+      run: |
+        echo "=== Verifying Update ==="
+        
+        sleep 30  # n8nの起動を待つ
+        
+        # 新しいバージョンを確認
+        NEW_VERSION=$(gcloud compute ssh ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --command="docker exec n8n-app n8n --version" 2>/dev/null || echo "failed")
+        
+        echo "New version: $NEW_VERSION"
+        
+        if [ "$NEW_VERSION" = "${{ steps.latest_version.outputs.latest_version }}" ]; then
+          echo "✅ Update successful!"
+        else
+          echo "⚠️ Update verification failed"
+          exit 1
+        fi
+        
+        # ヘルスチェック
+        HEALTH_CHECK=$(gcloud compute ssh ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --command="curl -f http://localhost:8080/healthz" 2>/dev/null || echo "failed")
+        
+        if [ "$HEALTH_CHECK" != "failed" ]; then
+          echo "✅ Health check passed"
+        else
+          echo "⚠️ Health check failed"
+        fi
+    
+    - name: Cleanup Old Images
+      if: steps.version_check.outputs.needs_update == 'true'
+      run: |
+        echo "=== Cleaning up old Docker images ==="
+        
+        gcloud compute ssh ${{ env.VM_NAME }} \
+          --zone=${{ env.VM_ZONE }} \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --command="
+            echo 'Removing dangling images...'
+            sudo docker image prune -f
+            
+            echo 'Current images:'
+            docker images | grep n8n
+            " || true
+    
+    - name: Summary
+      if: always()
+      run: |
+        echo "==================================="
+        echo "n8n Auto Update Summary"
+        echo "==================================="
+        echo "Timestamp: $(date)"
+        echo "VM: ${{ env.VM_NAME }}"
+        echo "Current Version: ${{ steps.current_version.outputs.current_version }}"
+        echo "Latest Version: ${{ steps.latest_version.outputs.latest_version }}"
+        echo "Update Needed: ${{ steps.version_check.outputs.needs_update }}"
+        echo "==================================="
