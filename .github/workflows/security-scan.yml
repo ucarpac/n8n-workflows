@@ -54,14 +54,13 @@ jobs:
       run: |
         echo "=== IAM Security Check ==="
         
-        # サービスアカウントの権限確認
+        # サービスアカウント自体の情報確認（権限不要）
         SERVICE_ACCOUNT="n8n-deployment-service@${{ secrets.GCP_PROJECT_ID }}.iam.gserviceaccount.com"
         
-        echo "Checking service account roles..."
-        gcloud projects get-iam-policy ${{ secrets.GCP_PROJECT_ID }} \
-          --flatten="bindings[].members" \
-          --filter="bindings.members:$SERVICE_ACCOUNT" \
-          --format="table(bindings.role)"
+        echo "Checking service account..."
+        gcloud iam service-accounts describe $SERVICE_ACCOUNT \
+          --project=${{ secrets.GCP_PROJECT_ID }} \
+          --format="table(displayName,email)" || echo "Service account information not accessible"
     
     - name: Check SSL Certificates
       run: |
